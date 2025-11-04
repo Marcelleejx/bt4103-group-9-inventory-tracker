@@ -267,6 +267,13 @@ elif page == "📈 Forecasting Dashboard":
         st.warning(f"⚠️ Could not load Prophet results: {e}")
         prophet_outputs = None
 
+    def get_test_data(cluster_id, freq_key, sarima_outputs):
+        if sarima_outputs and freq_key in sarima_outputs and cluster_id in sarima_outputs[freq_key]:
+            cluster_sarima = sarima_outputs[freq_key][cluster_id]
+            test_dates = pd.to_datetime(cluster_sarima.get('dates_test', []))
+            test_actuals = cluster_sarima.get('y_test', [])
+            return test_dates, test_actuals
+        return [], []
     # -------------------------
     # Load Next-Week and Next-Day Predictions (Random Forest & XGBoost)
     # -------------------------
@@ -387,15 +394,25 @@ elif page == "📈 Forecasting Dashboard":
         
         if predictions_dict and cluster_id in predictions_dict and selected_model in predictions_dict[cluster_id]:
             model_data = predictions_dict[cluster_id][selected_model]
-            
             # Check if it's the new format (with y_pred and transaction_date)
             if isinstance(model_data, pd.DataFrame):
                 forecast_dates = pd.to_datetime(model_data["transaction_date"])
-                item_forecast_values = np.array(model_data["y_pred"]) * item_prop
-            # Or old format (with 'forecast' and 'dates_test' keys)
-            elif isinstance(model_data, dict) and 'forecast' in model_data:
-                forecast_dates = pd.to_datetime(model_data["dates_test"])
-                item_forecast_values = np.array(model_data["forecast"]) * item_prop
+                item_forecast_values = np.array(model_data["y_pred"]) * item_prop            
+            
+            elif isinstance(model_data, dict):
+                # Filter out the 'nan' at the end of the list
+                model_data = model_data.get('h1')
+                cluster_forecast = np.array([x for x in model_data if not pd.isna(x)])
+                item_forecast_values = cluster_forecast * item_prop
+                
+                # Fetch corresponding dates from SARIMA output for the test period
+                test_dates, _ = get_test_data(cluster_id, freq_key, sarima_outputs)
+                if len(test_dates) == len(cluster_forecast):
+                    forecast_dates = test_dates
+                else:
+                    st.warning(f"Prediction length ({len(cluster_forecast)}) does not match SARIMA test date length ({len(test_dates)}). Cannot plot {selected_model} forecast correctly.")
+                    item_forecast_values = []
+            
             else:
                 st.warning(f"Unexpected format for {selected_model} predictions")
         else:
