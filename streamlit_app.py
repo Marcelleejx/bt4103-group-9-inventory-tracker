@@ -230,7 +230,7 @@ if page == "📊 Transaction Explorer":
     st.caption("EDA section: Visualizations update with sidebar filters.")
 
 # ==========================================
-# 📊 Page 2: Forecasting Results & Cluster Insights
+# 📈 Page 2: Forecasting Results & Cluster Insights
 # ==========================================
 elif page == "📈 Forecasting Dashboard":
     import pickle
@@ -244,16 +244,51 @@ elif page == "📈 Forecasting Dashboard":
     st.markdown("Visualize forecast results and cluster consumption proportions.")
 
     # -------------------------
-    # Load SARIMA outputs
+    # Load Model outputs
     # -------------------------
-    results_path = "./Data/sarima_outputs_20251101.pkl"
+    sarima_path = "./Data/sarima_outputs_20251101.pkl"
+    prophet_path = "./Data/prophet_outputs_20251104.pkl"
+    
+    # Load SARIMA
     try:
-        with open(results_path, "rb") as f:
+        with open(sarima_path, "rb") as f:
             sarima_outputs = pickle.load(f)
         st.success("✅ SARIMA outputs loaded!")
     except Exception as e:
-        st.error(f"⚠️ Could not load SARIMA results: {e}")
+        st.warning(f"⚠️ Could not load SARIMA results: {e}")
         sarima_outputs = None
+    
+    # Load Prophet (weekly only)
+    try:
+        with open(prophet_path, "rb") as f:
+            prophet_outputs = pickle.load(f)
+        st.success("✅ Prophet outputs loaded!")
+    except Exception as e:
+        st.warning(f"⚠️ Could not load Prophet results: {e}")
+        prophet_outputs = None
+
+    # -------------------------
+    # Load Next-Week and Next-Day Predictions (Random Forest & XGBoost)
+    # -------------------------
+    next_weekly_pred_path = "./Data/next_weekly_predictions.pkl"
+    next_daily_pred_path = "./Data/next_day_predictions.pkl"
+
+    next_week_predictions = None
+    next_daily_predictions = None
+
+    try:
+        with open(next_weekly_pred_path, "rb") as f:
+            next_week_predictions = pickle.load(f)
+        st.success("✅ Next-week predictions (RF/XGBoost) loaded!")
+    except Exception as e:
+        st.warning(f"⚠️ Could not load next-week predictions: {e}")
+    
+    try:
+        with open(next_daily_pred_path, "rb") as f:
+            next_daily_predictions = pickle.load(f)
+        st.success("✅ Next-day predictions (RF/XGBoost) loaded!")
+    except Exception as e:
+        st.warning(f"⚠️ Could not load next-day predictions: {e}")
 
     # -------------------------
     # Load proportions and transaction info
@@ -293,7 +328,12 @@ elif page == "📈 Forecasting Dashboard":
         selected_med = st.selectbox("Select Medicine", med_list if med_list else ["No data"])
 
     with col_c:
-        selected_model = st.selectbox("Select Model", ["SARIMA"])  # extendable for future models
+        # Model options depend on frequency
+        if selected_freq == "Weekly":
+            model_options = ["SARIMA", "Random Forest", "XGBoost", "Prophet"]
+        else:  # Daily
+            model_options = ["SARIMA", "Random Forest", "XGBoost"]
+        selected_model = st.selectbox("Select Model", model_options)
 
     st.markdown("---")
 
@@ -318,19 +358,59 @@ elif page == "📈 Forecasting Dashboard":
     hist_df = trans_df[trans_df['item_id'] == item_id].copy()
     if selected_freq == "Weekly":
         hist_df = hist_df.groupby(pd.Grouper(key='transaction_date', freq='W-SUN'))['quantity_consumed'].sum().reset_index()
+    else:  # Daily
+        hist_df = hist_df.groupby('transaction_date')['quantity_consumed'].sum().reset_index()
+    
     hist_dates = hist_df['transaction_date']
     hist_values = hist_df['quantity_consumed']
 
     # -------------------------
-    # Prepare forecast from cluster
+    # Prepare forecast from cluster based on selected model and frequency
     # -------------------------
-    if sarima_outputs:
-        cluster_forecast = sarima_outputs[freq_key][cluster_id]['forecast']
-        forecast_dates = sarima_outputs[freq_key][cluster_id]['dates_test']
-        item_forecast_values = np.array(cluster_forecast) * item_prop
-    else:
-        forecast_dates = []
-        item_forecast_values = []
+    forecast_dates = []
+    item_forecast_values = []
+    
+    if selected_model == "SARIMA":
+        if sarima_outputs and freq_key in sarima_outputs and cluster_id in sarima_outputs[freq_key]:
+            cluster_forecast = sarima_outputs[freq_key][cluster_id]['forecast']
+            forecast_dates = sarima_outputs[freq_key][cluster_id]['dates_test']
+            item_forecast_values = np.array(cluster_forecast) * item_prop
+        else:
+            st.warning(f"No SARIMA forecast available for {freq_key} cluster {cluster_id}")
+    
+    elif selected_model in ["Random Forest", "XGBoost"]:
+        # Choose the correct predictions dictionary based on frequency
+        if selected_freq == "Weekly":
+            predictions_dict = next_week_predictions
+        else:  # Daily
+            predictions_dict = next_daily_predictions
+        
+        if predictions_dict and cluster_id in predictions_dict and selected_model in predictions_dict[cluster_id]:
+            model_data = predictions_dict[cluster_id][selected_model]
+            
+            # Check if it's the new format (with y_pred and transaction_date)
+            if isinstance(model_data, pd.DataFrame):
+                forecast_dates = pd.to_datetime(model_data["transaction_date"])
+                item_forecast_values = np.array(model_data["y_pred"]) * item_prop
+            # Or old format (with 'forecast' and 'dates_test' keys)
+            elif isinstance(model_data, dict) and 'forecast' in model_data:
+                forecast_dates = pd.to_datetime(model_data["dates_test"])
+                item_forecast_values = np.array(model_data["forecast"]) * item_prop
+            else:
+                st.warning(f"Unexpected format for {selected_model} predictions")
+        else:
+            st.warning(f"No {selected_model} forecast found for {freq_key} cluster {cluster_id}")
+    
+    elif selected_model == "Prophet":
+        if selected_freq == "Weekly" and prophet_outputs:
+            if "weekly" in prophet_outputs and cluster_id in prophet_outputs["weekly"]:
+                cluster_forecast = prophet_outputs["weekly"][cluster_id]['forecast']
+                forecast_dates = pd.to_datetime(prophet_outputs["weekly"][cluster_id]['dates_test'])
+                item_forecast_values = np.array(cluster_forecast) * item_prop
+            else:
+                st.warning(f"No Prophet forecast available for cluster {cluster_id}")
+        else:
+            st.warning("Prophet is only available for weekly forecasts")
 
     # -------------------------
     # Plot Actual vs Forecast
@@ -353,7 +433,7 @@ elif page == "📈 Forecasting Dashboard":
         ))
 
     fig.update_layout(
-        title=f"{selected_item_name} - Actual vs Forecast ({selected_freq})",
+        title=f"{selected_item_name} - Actual vs Forecast ({selected_freq}, {selected_model})",
         xaxis_title="Date",
         yaxis_title="Quantity Consumed",
         height=500,
