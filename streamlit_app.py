@@ -247,24 +247,38 @@ elif page == "📈 Forecasting Dashboard":
     # Load Model outputs
     # -------------------------
     sarima_path = "./Data/sarima_outputs_20251101.pkl"
-    prophet_path = "./Data/prophet_outputs_20251104.pkl"
+    prophet_path = "./Data/prophet_weekly_outputs.pkl"
     
     # Load SARIMA
     try:
         with open(sarima_path, "rb") as f:
             sarima_outputs = pickle.load(f)
-        st.success("✅ SARIMA outputs loaded!")
     except Exception as e:
         st.warning(f"⚠️ Could not load SARIMA results: {e}")
         sarima_outputs = None
     
-    # Load Prophet (weekly only)
+    # Load Prophet (both daily and weekly)
+    prophet_weekly_path = "./Data/prophet_weekly_outputs.pkl"
+    prophet_daily_path = "./Data/prophet_daily_outputs.pkl"
+    
+    prophet_outputs = {}
+    
     try:
-        with open(prophet_path, "rb") as f:
-            prophet_outputs = pickle.load(f)
-        st.success("✅ Prophet outputs loaded!")
+        with open(prophet_weekly_path, "rb") as f:
+            prophet_weekly = pickle.load(f)
+        prophet_outputs.update(prophet_weekly)
     except Exception as e:
-        st.warning(f"⚠️ Could not load Prophet results: {e}")
+        st.warning(f"⚠️ Could not load Prophet weekly results: {e}")
+    
+    try:
+        with open(prophet_daily_path, "rb") as f:
+            prophet_daily = pickle.load(f)
+        prophet_outputs.update(prophet_daily)
+    except Exception as e:
+        st.warning(f"⚠️ Could not load Prophet daily results: {e}")
+    
+    # Set to None if no data was loaded
+    if not prophet_outputs:
         prophet_outputs = None
 
     def get_test_data(cluster_id, freq_key, sarima_outputs):
@@ -286,14 +300,12 @@ elif page == "📈 Forecasting Dashboard":
     try:
         with open(next_weekly_pred_path, "rb") as f:
             next_week_predictions = pickle.load(f)
-        st.success("✅ Next-week predictions (RF/XGBoost) loaded!")
     except Exception as e:
         st.warning(f"⚠️ Could not load next-week predictions: {e}")
     
     try:
         with open(next_daily_pred_path, "rb") as f:
             next_daily_predictions = pickle.load(f)
-        st.success("✅ Next-day predictions (RF/XGBoost) loaded!")
     except Exception as e:
         st.warning(f"⚠️ Could not load next-day predictions: {e}")
 
@@ -335,11 +347,8 @@ elif page == "📈 Forecasting Dashboard":
         selected_med = st.selectbox("Select Medicine", med_list if med_list else ["No data"])
 
     with col_c:
-        # Model options depend on frequency
-        if selected_freq == "Weekly":
-            model_options = ["SARIMA", "Random Forest", "XGBoost", "Prophet"]
-        else:  # Daily
-            model_options = ["SARIMA", "Random Forest", "XGBoost"]
+        # Prophet is now available for both Daily and Weekly
+        model_options = ["SARIMA", "Random Forest", "XGBoost", "Prophet"]
         selected_model = st.selectbox("Select Model", model_options)
 
     st.markdown("---")
@@ -419,34 +428,74 @@ elif page == "📈 Forecasting Dashboard":
             st.warning(f"No {selected_model} forecast found for {freq_key} cluster {cluster_id}")
     
     elif selected_model == "Prophet":
-        if selected_freq == "Weekly" and prophet_outputs:
-            if "weekly" in prophet_outputs and cluster_id in prophet_outputs["weekly"]:
-                cluster_forecast = prophet_outputs["weekly"][cluster_id]['forecast']
-                forecast_dates = pd.to_datetime(prophet_outputs["weekly"][cluster_id]['dates_test'])
+        if prophet_outputs and freq_key in prophet_outputs:
+            if cluster_id in prophet_outputs[freq_key]:
+                cluster_forecast = prophet_outputs[freq_key][cluster_id]['forecast']
+                forecast_dates = pd.to_datetime(prophet_outputs[freq_key][cluster_id]['dates_test'])
                 item_forecast_values = np.array(cluster_forecast) * item_prop
             else:
                 st.warning(f"No Prophet forecast available for cluster {cluster_id}")
         else:
-            st.warning("Prophet is only available for weekly forecasts")
+            st.warning(f"Prophet forecasts not available for {freq_key} frequency")
 
     # -------------------------
     # Plot Actual vs Forecast
     # -------------------------
     fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=hist_dates,
-        y=hist_values,
-        mode='lines+markers',
-        name='Actual',
-        line=dict(color='blue')
-    ))
+    
+    # Determine test set start and end dates
+    test_start_date = None
+    test_end_date = None
+    if len(forecast_dates) > 0:
+        forecast_dates_dt = pd.to_datetime(forecast_dates)
+        test_start_date = forecast_dates_dt.min()
+        test_end_date = forecast_dates_dt.max()
+    
+    # Split actual data into training and test periods
+    if test_start_date is not None and test_end_date is not None:
+        # Training period (before test set) - full opacity
+        train_mask = hist_dates < test_start_date
+        if train_mask.any():
+            fig.add_trace(go.Scatter(
+                x=hist_dates[train_mask],
+                y=hist_values[train_mask],
+                mode='lines+markers',
+                name='Actual (Training)',
+                line=dict(color='blue'),
+                marker=dict(color='blue')
+            ))
+        
+        # Test period (during test set only) - lighter tone (30% opacity)
+        test_mask = (hist_dates >= test_start_date) & (hist_dates <= test_end_date)
+        if test_mask.any():
+            fig.add_trace(go.Scatter(
+                x=hist_dates[test_mask],
+                y=hist_values[test_mask],
+                mode='lines+markers',
+                name='Actual (Test)',
+                line=dict(color='rgba(0, 0, 255, 0.3)'),
+                marker=dict(color='rgba(0, 0, 255, 0.3)')
+            ))
+    else:
+        # No forecast available, show all actual data with full opacity
+        fig.add_trace(go.Scatter(
+            x=hist_dates,
+            y=hist_values,
+            mode='lines+markers',
+            name='Actual',
+            line=dict(color='blue'),
+            marker=dict(color='blue')
+        ))
+    
+    # Add forecast with normal styling
     if len(forecast_dates) > 0:
         fig.add_trace(go.Scatter(
             x=forecast_dates,
             y=item_forecast_values,
             mode='lines+markers',
             name='Forecast',
-            line=dict(color='red', dash='dash')
+            line=dict(color='red', dash='dash'),
+            marker=dict(color='red')
         ))
 
     fig.update_layout(
